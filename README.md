@@ -42,8 +42,12 @@ scripts and a `CLAUDE.md` template, and offers to connect Claude Code.
 For unattended setup, save the installer outside the target directory and run
 `bash /path/to/install-from-github.sh --non-interactive` from an empty directory.
 
-**Windows (PowerShell 5.1 or newer):** Download both installer scripts into a
-separate folder, then run the installer from an empty installation folder:
+**Windows (PowerShell 5.1 or newer):**\
+Download both installer scripts into a separate folder, then run the installer from an empty installation folder.\
+An empty folder has no installer yet, and the installer needs `install-xpi.ps1` beside it.\
+Keeping both outside the target also satisfies the unattended installer's empty-folder check.
+
+Use separate commands below: PowerShell 5.1 cannot parse `&&`, which was added in PowerShell 7.
 
 ```powershell
 New-Item -ItemType Directory foxmcp-installer

@@ -241,18 +241,25 @@ function Extract-And-Setup {
 
     $downloadDir = Join-Path (Get-Location) "foxmcp-downloads"
 
-    # The release ZIP already contains a server-package/ directory.
+    # The release ZIP already wraps its files in `server-package/`.
+    # Extracts to a staging folder to copy the contents without installing another nested folder.
     $serverExtract = Join-Path $downloadDir "extracted"
     New-Item -ItemType Directory -Path $serverExtract -Force | Out-Null
+
+    # `LiteralPath` supports paths containing brackets.
+    # Lets extraction errors reach the main error handler instead of continuing with an incomplete installation.
     Expand-Archive -LiteralPath (Join-Path $downloadDir "foxmcp-server.zip") -DestinationPath $serverExtract -Force
     $serverPackage = Join-Path $serverExtract "server-package"
+    
+    # Startup needs `server.py` and pip needs `requirements.txt`
+    # Rejects a broken package here before copying files or trying to install dependencies.
     foreach ($requiredFile in @("server.py", "requirements.txt")) {
         if (-not (Test-Path -LiteralPath (Join-Path $serverPackage $requiredFile) -PathType Leaf)) {
             throw "Invalid server package: missing server-package/$requiredFile"
         }
     }
 
-    # Move server files to parent directory
+    # Copy the wrapper's contents so startup and pip can find `server/server.py` and `server/requirements.txt` rather than `server/server-package/...`
     New-Item -ItemType Directory -Path "server" -Force | Out-Null
     Get-ChildItem -LiteralPath $serverPackage -Force | Copy-Item -Destination "server/" -Recurse -Force
 
@@ -289,7 +296,8 @@ function Setup-PythonEnvironment {
         throw "Failed to create Python virtual environment"
     }
 
-    # Install directly into the virtual environment without activating it.
+    # Uses this environment's Python so pip installs into it even if another Python is on PATH.
+    # Activation is unnecessary when using the full path.
     $venvPython = Join-Path (Get-Location) "venv\Scripts\python.exe"
 
     if (Test-Path "server/requirements.txt") {
@@ -301,6 +309,8 @@ function Setup-PythonEnvironment {
         }
         Write-Success "Python dependencies installed"
     } else {
+        # Replaced the warning with `throw`. Because warning would let installation report success without dependencies.
+        # The main catch handles this error, shows the reason, and exits with 1.
         throw "server/requirements.txt not found; cannot install Python dependencies"
     }
 }
@@ -440,12 +450,16 @@ function Create-StartScript {
 #requires -Version 5.1
 
 # FoxMCP Startup Script
+# Stop on PowerShell errors instead of continuing with an incomplete setup.
 $ErrorActionPreference = 'Stop'
 Write-Host "Starting FoxMCP Server..." -ForegroundColor Cyan
 
 # Resolve paths from the installation, regardless of the caller's directory.
+# The installer puts server/ beside venv/, not in the parent directory.
 $venvPython = Join-Path $PSScriptRoot "venv\Scripts\python.exe"
 $serverScript = Join-Path $PSScriptRoot "server\server.py"
+
+# Check the actual files: a leftover folder alone does not mean setup succeeded.
 if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
     Write-Host "[ERROR] Virtual environment not found. Run install-from-github.ps1 first." -ForegroundColor Red
     exit 1
@@ -460,6 +474,9 @@ $env:FOXMCP_EXT_SCRIPTS = Join-Path $PSScriptRoot "predefined-scripts"
 
 Write-Host "Starting WebSocket (8765) and MCP (3000) servers..." -ForegroundColor Cyan
 Write-Host ("Predefined scripts directory: " + $env:FOXMCP_EXT_SCRIPTS) -ForegroundColor Cyan
+
+# Run the Python that has our dependencies; no activation or PATH lookup needed.
+# Forward startup options and return Python's exit code so failures reach callers.
 & $venvPython $serverScript @args
 exit $LASTEXITCODE
 '@
@@ -599,6 +616,7 @@ $host.UI.RawUI.FlushInputBuffer()
 try {
     Main
 } catch {
+    # Required-step failures stop here with a readable error, not a success guide.
     Write-ErrorMsg "Installation failed: $($_.Exception.Message)"
     exit 1
 }
