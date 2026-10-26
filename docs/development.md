@@ -459,26 +459,28 @@ the package as published until PyPI serves that tested version.
 
 ### Port conflicts
 
-If the MCP HTTP port is occupied, v1.4.0 logs an `address already in use` error
-but leaves its WebSocket server running. A connected Firefox extension or a
-426 response from the WebSocket port does not prove that the MCP endpoint is
-working. Check the startup log and both ports; an HTTP response on the occupied
-port may come from the other service.
+If the MCP port is busy, FoxMCP tries the next available port. It checks IPv4
+and IPv6, trying up to 100 ports from **3000** or the value of `--mcp-port`.
 
-Stop the FoxMCP process you just started, choose unused ports, and start it
-manually. For a release installation, preserve the example-script directory:
+Use the `/mcp/` URL printed after startup in your MCP client. If startup fails,
+FoxMCP stops and reports the error.
+
+To choose a different starting port:
+
+```bash
+uvx foxmcp --mcp-port 4000
+```
+
+For a GitHub archive installation:
 
 ```bash
 # From the installation directory, instead of ./start-foxmcp.sh
 export FOXMCP_EXT_SCRIPTS="$PWD/predefined-scripts"
-venv/bin/python server/server.py --port 9000 --mcp-port 4000
+venv/bin/python server/server.py --mcp-port 4000
 ```
 
-Set the extension's WebSocket port to **9000** and the MCP client's URL to
-`http://localhost:4000/mcp/`. Check the new WebSocket port for a 426 response and
-the new MCP URL for a 307 redirect; then connect an MCP client and list tools.
-The generated `start-foxmcp.sh` uses the default ports, so use the manual command
-for this setup.
+The extension's WebSocket port stays fixed. If it is busy, add `--port 9000`
+and set the extension to the same port.
 
 ### README installation verification
 

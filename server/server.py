@@ -7,8 +7,9 @@ Licensed under the MIT License - see LICENSE file for details
 """
 
 import argparse
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 import asyncio
+import errno
 import json
 import logging
 import re
@@ -31,15 +32,6 @@ except ImportError:
     from mcp_tools import FoxMCPTools
     from file_transfer import FileTransferServer
     from browser_proxy import BrowserProxyHub, EXTENSION_ORIGIN_PATTERN
-
-# Try to import port coordinator for dynamic port allocation
-try:
-    tests_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'tests')
-    sys.path.insert(0, tests_dir)
-    from port_coordinator import get_port_by_type
-    HAS_PORT_COORDINATOR = True
-except ImportError:
-    HAS_PORT_COORDINATOR = False
 
 # Configure logging
 #
@@ -65,32 +57,60 @@ logger = logging.getLogger(__name__)
 # BrowserProxyHub applies separate checks to `/discovery` and `/proxy` before
 # either can reach the extension handler. Local proxies have no Origin header.
 
-def find_available_port(start_port=3000, max_attempts=100):
-    """Find an available port starting from start_port"""
-    if HAS_PORT_COORDINATOR:
-        # Use the fixed MCP port if available
-        try:
-            return get_port_by_type('mcp')
-        except Exception:
-            pass  # Fall through to traditional approach
-    else:
-        # Fallback to traditional approach
-        for i in range(max_attempts):
-            port = start_port + i
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    sock.bind(('localhost', port))
-                    return port
-            except OSError:
-                continue
+def find_available_port(start_port: int = 3000, max_attempts: int = 100,
+                        *, host: str = "localhost") -> int:
+    """Find a port available on every enabled address of host, without reserving it."""
+    if not 1 <= start_port <= 65535:
+        raise ValueError("MCP port must be between 1 and 65535")
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be positive")
 
-    raise RuntimeError(f"Could not find available port starting from {start_port}")
+    addresses = set(socket.getaddrinfo(
+        host, start_port, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, socket.AI_PASSIVE
+    ))
+    last_port = min(start_port + max_attempts - 1, 65535)
+    for port in range(start_port, last_port + 1):
+        try:
+            with ExitStack() as sockets:
+                bound = False
+                for family, socktype, proto, _, address in addresses:
+                    try:
+                        sock = socket.socket(family, socktype, proto)
+                    except OSError as error:
+                        if error.errno in (errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT):
+                            continue
+                        raise
+                    sockets.enter_context(sock)
+                    # Match asyncio's socket settings. Windows address reuse can
+                    # take over an occupied port, so leave it off there.
+                    if os.name == 'posix' and sys.platform != 'cygwin':
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    if family == socket.AF_INET6:
+                        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                    try:
+                        sock.bind((address[0], port, *address[2:]))
+                    except OSError as error:
+                        if error.errno == errno.EADDRNOTAVAIL:
+                            continue  # The address exists but is disabled on this host.
+                        raise
+                    bound = True
+                if not bound:
+                    raise OSError(f"Could not bind to any address for {host}")
+                return port
+        except OSError as error:
+            if error.errno != errno.EADDRINUSE:
+                raise
+
+    raise RuntimeError(
+        f"No available MCP port on {host} in range {start_port}-{last_port}. "
+        "Free a port or choose another range with --mcp-port."
+    )
 
 class FoxMCPServer:
     # How often to check whether the MCP clients owning monitors are still there
     MONITOR_REAP_INTERVAL = 5.0
     VERSION_REPORT_TIMEOUT = 5.0
+    MCP_STARTUP_TIMEOUT = 5.0
 
     # Owner recorded for a monitor started outside any MCP session, which is what
     # a tool called in-process rather than over a transport gets. There is no
@@ -109,35 +129,18 @@ class FoxMCPServer:
         self.host = host
         self.port = port
         self.use_stdio = use_stdio
+        self._preferred_mcp_port = 3000 if mcp_port is None else mcp_port
 
-        # In stdio mode the MCP side has no listener, so there is no port to pick.
-        # Running the selection anyway would bind-test a port nothing serves and
-        # report "port in use" against whatever else holds 3000 - most likely the
-        # user's own HTTP-mode server, which is not a conflict at all here.
-        if use_stdio:
+        # Stdio and disabled MCP don't open an HTTP listener.
+        if use_stdio or not start_mcp:
             self.mcp_port = None
-        # Set MCP port - default to 3000 for production, dynamic allocation only for tests
-        elif mcp_port is None:
-            # Check if we're in a test environment by checking for pytest or explicit test indicators
-            in_test_env = ('pytest' in sys.modules or
-                          'PYTEST_CURRENT_TEST' in os.environ or
-                          any('pytest' in path or 'test_' in os.path.basename(path) for path in sys.path))
-            if in_test_env and HAS_PORT_COORDINATOR:
-                # Use dynamic port allocation for tests to avoid conflicts
-                self.mcp_port = find_available_port(3000)
-            else:
-                # Use fixed port 3000 for production
-                self.mcp_port = 3000
         else:
-            # Check if requested port is available
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    sock.bind(('localhost', mcp_port))
-                    self.mcp_port = mcp_port
-            except OSError:
-                logger.warning(f"Requested MCP port {mcp_port} is in use, finding alternative...")
-                self.mcp_port = find_available_port(mcp_port)
+            self.mcp_port = find_available_port(self._preferred_mcp_port, host=self.host)
+            if self.mcp_port != self._preferred_mcp_port:
+                logger.warning(
+                    "MCP port %s is unavailable; selected port %s.",
+                    self._preferred_mcp_port, self.mcp_port
+                )
 
         if self.mcp_port is not None:
             logger.info(f"MCP server will use port {self.mcp_port}")
@@ -799,42 +802,56 @@ class FoxMCPServer:
             return False
 
     async def start_mcp_server(self):
-        """Start the MCP server in a separate thread"""
-        import threading
-
-        # Create shutdown event
+        """Start the MCP worker and wait until its HTTP listener is ready."""
         self._shutdown_event = threading.Event()
+        startup_error = None
+        self.mcp_http_app = self.mcp_app.http_app()
+        config = uvicorn.Config(
+            self.mcp_http_app,
+            host=self.host,
+            port=self.mcp_port,
+            log_level="error"
+        )
+        instance = self.mcp_server_instance = uvicorn.Server(config)
 
         def run_mcp_server():
+            nonlocal startup_error
             try:
                 logger.info(f"Starting MCP server on {self.host}:{self.mcp_port}")
-
-                # Create server config
-                self.mcp_http_app = self.mcp_app.http_app()
-                config = uvicorn.Config(
-                    self.mcp_http_app,
-                    host=self.host,
-                    port=self.mcp_port,
-                    log_level="error"  # Reduce log noise during tests
-                )
-
-                # Create server instance
-                self.mcp_server_instance = uvicorn.Server(config)
-
-                # Run server
-                self.mcp_server_instance.run()
-
-            except Exception as e:
-                logger.warning(f"MCP server failed to start on {self.host}:{self.mcp_port}: {e}")
-                # Don't crash the whole server if MCP fails - this is important for tests
+                instance.run()
+            except (Exception, SystemExit) as error:
+                # Uvicorn uses SystemExit for startup failures. Pass it back to the
+                # caller so a failed worker cannot look like successful startup.
+                startup_error = error
+                if instance.started:
+                    logger.error("MCP server failed on %s:%s: %s",
+                                 self.host, self.mcp_port, error)
+            finally:
+                self._shutdown_event.set()
 
         # Run MCP server in separate thread
         self.mcp_thread = threading.Thread(target=run_mcp_server, daemon=True)
         self.mcp_thread.start()
-        logger.info(f"MCP server thread started for {self.host}:{self.mcp_port}")
-
-        # Give MCP server time to start (reduced time for faster tests)
-        await asyncio.sleep(0.5)
+        deadline = asyncio.get_running_loop().time() + self.MCP_STARTUP_TIMEOUT
+        try:
+            while True:
+                if self._shutdown_event.is_set() or not self.mcp_thread.is_alive():
+                    detail = f": {startup_error}" if startup_error is not None else ""
+                    raise RuntimeError(
+                        f"MCP server failed to start on {self.host}:{self.mcp_port}{detail}. "
+                        "Check the error above, then retry or choose a port with --mcp-port."
+                    ) from startup_error
+                if instance.started:
+                    return
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise TimeoutError(
+                        f"MCP server on {self.host}:{self.mcp_port} did not start within "
+                        f"{self.MCP_STARTUP_TIMEOUT:g} seconds. Check the startup log and retry."
+                    )
+                await asyncio.sleep(0.05)
+        except (Exception, asyncio.CancelledError):
+            self._stop_mcp_server()
+            raise
 
     def _stop_mcp_server(self):
         """Stop the MCP server gracefully"""
@@ -961,8 +978,15 @@ class FoxMCPServer:
         # loop until the client hangs up. Awaiting it here would mean never
         # reaching the WebSocket server it depends on.
         if self.start_mcp and not self.use_stdio:
-            await self.start_mcp_server()
-            logger.info(f"MCP tools available at http://{self.host}:{self.mcp_port}/")
+            try:
+                await self.start_mcp_server()
+            except (Exception, asyncio.CancelledError):
+                await self._stop()
+                raise
+            url = f"http://{self.host}:{self.mcp_port}/mcp/"
+            logger.info("MCP tools available at %s", url)
+            if self.mcp_port != self._preferred_mcp_port:
+                logger.warning("Update your MCP client's URL to %s", url)
         elif not self.start_mcp:
             logger.info("MCP server disabled for this instance")
 
@@ -1060,7 +1084,8 @@ async def main():
     parser.add_argument('--port', type=int, default=8765,
                         help='WebSocket port (default: 8765)')
     parser.add_argument('--mcp-port', type=int, default=None,
-                        help='MCP server port (default: 3000, dynamic allocation in tests)')
+                        help='Preferred MCP HTTP port (default: 3000); tries up to 100 '
+                             'ports starting here if occupied. Use the URL in the startup log.')
     parser.add_argument('--no-mcp', action='store_true',
                         help='Disable MCP server')
     parser.add_argument('--stdio', action='store_true',

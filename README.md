@@ -83,6 +83,10 @@ Leave it running. Click the FoxMCP toolbar icon in Firefox and check that it sho
 a connected status. The default ports are **8765** for the extension's WebSocket
 connection and **3000** for the MCP HTTP endpoint.
 
+If the MCP port is busy, FoxMCP tries the next available port.\
+Use the `/mcp/` URL printed after startup in your MCP client.\
+If startup fails, FoxMCP stops and reports the error. See [port conflicts](docs/development.md#port-conflicts).
+
 ### 4. Connect your AI client
 
 For Claude Code, run this in another terminal:
@@ -248,9 +252,9 @@ adding scripts to refresh the list shown to clients. See the
 
 | Problem | Check |
 |---|---|
-| Extension disconnected | Start the server and check the host/port in the FoxMCP popup. `curl -i http://localhost:8765` should return **426 Upgrade Required**. |
-| MCP client cannot connect | Check its URL. `curl -i http://localhost:3000/mcp/` should return a **307** redirect when using HTTP mode. |
-| Server logs “address already in use” | Another service owns a port. FoxMCP can keep running even when its MCP listener fails; use [different ports](docs/development.md#port-conflicts) and check both listeners. |
+| Extension disconnected | Start the server and check the host/port in the FoxMCP popup. <br> `curl -i http://localhost:8765` should return **426 Upgrade Required**. |
+| MCP client cannot connect | Use the `/mcp/` URL printed after successful startup. <br> Update the client's URL if the port changed. |
+| Server logs “address already in use” | FoxMCP tries another MCP port. <br> For startup errors or a busy WebSocket port, see [port conflicts](docs/development.md#port-conflicts). |
 | Server reports missing Python packages | Use `venv/bin/python`, or the provided startup script. |
 | Built extension will not install | Follow the [Firefox channel and signing guidance](docs/development.md#loading-in-firefox). |
 

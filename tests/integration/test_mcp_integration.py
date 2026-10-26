@@ -195,14 +195,14 @@ class TestMCPServerConfiguration:
     """Test MCP server configuration options"""
     
     def test_default_ports(self):
-        """Test default port configuration uses dynamic allocation"""
-        server = FoxMCPServer(start_mcp=False)
+        """HTTP defaults use the isolated ports supplied by the test fixture."""
+        server = FoxMCPServer()
 
         # Port isolation system overrides default 8765 with dynamic port
         assert isinstance(server.port, int)
         assert server.port > 0  # Port should be positive
-        # Should use the fixed MCP port
-        expected_mcp_port = get_port_by_type('mcp')
+        # The fixture supplies an explicit MCP port for HTTP-enabled instances.
+        expected_mcp_port = get_port_by_type('test_mcp_individual')
         assert server.mcp_port == expected_mcp_port
     
     def test_custom_ports(self):
