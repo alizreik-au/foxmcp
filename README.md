@@ -42,14 +42,24 @@ scripts and a `CLAUDE.md` template, and offers to connect Claude Code.
 For unattended setup, save the installer outside the target directory and run
 `bash /path/to/install-from-github.sh --non-interactive` from an empty directory.
 
-**Windows:** Use PowerShell instead:
+**Windows (PowerShell 5.1 or newer):** Download both installer scripts into a
+separate folder, then run the installer from an empty installation folder:
 
 ```powershell
-mkdir foxmcp && cd foxmcp
-.\scripts\install-from-github.ps1
+New-Item -ItemType Directory foxmcp-installer
+$installerBase = 'https://raw.githubusercontent.com/ThinkerYzu/foxmcp/master/scripts'
+Invoke-WebRequest -UseBasicParsing "$installerBase/install-from-github.ps1" -OutFile foxmcp-installer/install-from-github.ps1
+Invoke-WebRequest -UseBasicParsing "$installerBase/install-xpi.ps1" -OutFile foxmcp-installer/install-xpi.ps1
+New-Item -ItemType Directory foxmcp
+Set-Location foxmcp
+& ..\foxmcp-installer\install-from-github.ps1 -NonInteractive
 ```
 
-For unattended setup, run `.\scripts\install-from-github.ps1 -NonInteractive` from an empty directory. This creates `venv/`, installs Python dependencies, creates `start-foxmcp.ps1`, installs example scripts, and creates a `CLAUDE.md` template.
+Keep the two scripts together and outside the installation folder. If you already
+have a source checkout, run its `scripts/install-from-github.ps1` by absolute path
+from an empty folder instead. Omit `-NonInteractive` to enable interactive prompts.
+The installer creates `venv/`, installs Python dependencies, creates
+`start-foxmcp.ps1`, installs example scripts, and creates a `CLAUDE.md` template.
 
 ### 2. Install the Firefox extension
 

@@ -241,14 +241,20 @@ function Extract-And-Setup {
 
     $downloadDir = Join-Path (Get-Location) "foxmcp-downloads"
 
-    # Extract server package
-    $serverExtract = Join-Path $downloadDir "server-package"
+    # The release ZIP already contains a server-package/ directory.
+    $serverExtract = Join-Path $downloadDir "extracted"
     New-Item -ItemType Directory -Path $serverExtract -Force | Out-Null
-    Expand-Archive -Path (Join-Path $downloadDir "foxmcp-server.zip") -DestinationPath $serverExtract -Force -ErrorAction SilentlyContinue
+    Expand-Archive -LiteralPath (Join-Path $downloadDir "foxmcp-server.zip") -DestinationPath $serverExtract -Force
+    $serverPackage = Join-Path $serverExtract "server-package"
+    foreach ($requiredFile in @("server.py", "requirements.txt")) {
+        if (-not (Test-Path -LiteralPath (Join-Path $serverPackage $requiredFile) -PathType Leaf)) {
+            throw "Invalid server package: missing server-package/$requiredFile"
+        }
+    }
 
     # Move server files to parent directory
     New-Item -ItemType Directory -Path "server" -Force | Out-Null
-    Copy-Item -Path (Join-Path $serverExtract "*") -Destination "server/" -Recurse -Force
+    Get-ChildItem -LiteralPath $serverPackage -Force | Copy-Item -Destination "server/" -Recurse -Force
 
     # Create proper directory structure
     New-Item -ItemType Directory -Path "dist/packages" -Force | Out-Null
@@ -279,8 +285,11 @@ function Setup-PythonEnvironment {
 
     # Create virtual environment
     & $script:PYTHON_CMD -m venv venv
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to create Python virtual environment"
+    }
 
-    # Activate virtual environment and install dependencies
+    # Install directly into the virtual environment without activating it.
     $venvPython = Join-Path (Get-Location) "venv\Scripts\python.exe"
 
     if (Test-Path "server/requirements.txt") {
@@ -292,7 +301,7 @@ function Setup-PythonEnvironment {
         }
         Write-Success "Python dependencies installed"
     } else {
-        Write-Warning "server/requirements.txt not found, skipping dependency installation"
+        throw "server/requirements.txt not found; cannot install Python dependencies"
     }
 }
 
@@ -431,28 +440,28 @@ function Create-StartScript {
 #requires -Version 5.1
 
 # FoxMCP Startup Script
+$ErrorActionPreference = 'Stop'
 Write-Host "Starting FoxMCP Server..." -ForegroundColor Cyan
 
-# Check if virtual environment exists
-$venvDir = Join-Path $PSScriptRoot "venv"
-if (!(Test-Path $venvDir)) {
+# Resolve paths from the installation, regardless of the caller's directory.
+$venvPython = Join-Path $PSScriptRoot "venv\Scripts\python.exe"
+$serverScript = Join-Path $PSScriptRoot "server\server.py"
+if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
     Write-Host "[ERROR] Virtual environment not found. Run install-from-github.ps1 first." -ForegroundColor Red
     exit 1
 }
-
-# Activate virtual environment
-$activateScript = Join-Path $venvDir "Scripts\Activate.ps1"
-& $activateScript
+if (-not (Test-Path -LiteralPath $serverScript -PathType Leaf)) {
+    Write-Host "[ERROR] Server not found at $serverScript. Run install-from-github.ps1 first." -ForegroundColor Red
+    exit 1
+}
 
 # Set predefined scripts directory
 $env:FOXMCP_EXT_SCRIPTS = Join-Path $PSScriptRoot "predefined-scripts"
 
 Write-Host "Starting WebSocket (8765) and MCP (3000) servers..." -ForegroundColor Cyan
 Write-Host ("Predefined scripts directory: " + $env:FOXMCP_EXT_SCRIPTS) -ForegroundColor Cyan
-python (Join-Path $PSScriptRoot "..\server\server.py")
-
-# Deactivate when done
-deactivate
+& $venvPython $serverScript @args
+exit $LASTEXITCODE
 '@
 
     Set-Content -Path "start-foxmcp.ps1" -Value $startScript -Encoding UTF8
@@ -590,6 +599,6 @@ $host.UI.RawUI.FlushInputBuffer()
 try {
     Main
 } catch {
-    Write-Host "`n[ERROR] Installation interrupted" -ForegroundColor Red
+    Write-ErrorMsg "Installation failed: $($_.Exception.Message)"
     exit 1
 }
